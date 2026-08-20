@@ -1,0 +1,13 @@
+# data + outputs (never commit scraped leads or the DB)
+*.db
+*.db-wal
+*.db-shm
+exports/
+*.log
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env

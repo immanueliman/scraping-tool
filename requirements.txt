@@ -1,0 +1,8 @@
+requests>=2.32.0
+beautifulsoup4>=4.12.3
+lxml>=5.2.0
+dnspython>=2.6.1
+ddgs>=6.0.0
+phonenumbers>=8.13.0
+typer>=0.12.3
+rich>=13.7.1
