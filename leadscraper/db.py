@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     function      TEXT,
     rank_score    INTEGER DEFAULT 0,
     industry      TEXT,
+    location      TEXT,
     verify        TEXT NOT NULL DEFAULT 'unknown',
     source        TEXT,
     status        TEXT NOT NULL DEFAULT 'new',
@@ -36,9 +37,24 @@ CREATE TABLE IF NOT EXISTS suppression (
     reason        TEXT,
     created_at    TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS state (
+    key           TEXT PRIMARY KEY,
+    value         TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_contacts_role   ON contacts(role);
 CREATE INDEX IF NOT EXISTS idx_contacts_verify ON contacts(verify);
+CREATE INDEX IF NOT EXISTS idx_contacts_rank   ON contacts(rank_score);
 """
+
+
+def get_state(conn, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM state WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_state(conn, key: str, value: str) -> None:
+    conn.execute("INSERT OR REPLACE INTO state (key, value) VALUES (?,?)",
+                 (key, str(value)))
 
 
 def now() -> str:
@@ -90,7 +106,7 @@ def upsert_contact(conn, *, email: str, company: str = "", domain: str = "",
                    linkedin: str | None = None, grade: str | None = None,
                    grade_label: str | None = None, function: str | None = None,
                    rank_score: int = 0, industry: str | None = None,
-                   source: str = "") -> int | None:
+                   location: str | None = None, source: str = "") -> int | None:
     """Insert or update a contact. Returns id, or None if suppressed.
 
     Richer detail (name/title/grade/rank) overwrites when a new pass finds it —
@@ -111,16 +127,17 @@ def upsert_contact(conn, *, email: str, company: str = "", domain: str = "",
             "phone = COALESCE(NULLIF(?,''), phone), linkedin = COALESCE(NULLIF(?,''), linkedin), "
             "grade = COALESCE(?, grade), grade_label = COALESCE(?, grade_label), "
             "function = COALESCE(?, function), rank_score = ?, "
-            "industry = COALESCE(?, industry) WHERE id = ?",
+            "industry = COALESCE(?, industry), "
+            "location = COALESCE(NULLIF(?,''), location) WHERE id = ?",
             (company, domain, role, full_name, title, phone, linkedin, grade,
-             grade_label, function, keep_rank, industry, row["id"]))
+             grade_label, function, keep_rank, industry, location, row["id"]))
         return int(row["id"])
     cur = conn.execute(
         "INSERT INTO contacts (email, company, domain, role, full_name, title, "
         "phone, linkedin, grade, grade_label, function, rank_score, industry, "
-        "source, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "location, source, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (email, company, domain, role, full_name, title, phone, linkedin, grade,
-         grade_label, function, rank_score, industry, source, now()))
+         grade_label, function, rank_score, industry, location, source, now()))
     return int(cur.lastrowid)
 
 

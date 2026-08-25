@@ -35,23 +35,41 @@ def init():
 
 @app.command()
 def crawl(once: bool = typer.Option(False, "--once", help="One cycle then stop"),
-          cycles: int = typer.Option(0, help="Stop after N cycles (0 = forever)")):
-    """Auto-discover HR/CEO/founder emails from the web — no key, no input."""
+          cycles: int = typer.Option(0, help="Stop after N cycles (0 = forever)"),
+          export_every: float = typer.Option(
+              6.0, help="Write a fresh CSV every N hours (0 = never). Default 6h.")):
+    """Auto-discover HR/CEO/founder leads worldwide — no key, no input.
+
+    Walks a priority list (India first, then the world) x all sectors, grading
+    and de-duplicating as it goes, and drops a timestamped CSV every few hours.
+    """
+    import time
     db.init()
     if not sources.search_available():
         console.print("[red]Search library missing:[/red] pip install ddgs")
         raise typer.Exit(1)
     console.print("[green]Crawling…[/green] Ctrl+C to stop. New leads print live.")
+    last_export = time.monotonic()
+
+    def do_export():
+        with db.session() as conn:
+            path, n = exporter.export_leads(conn, fresh=True)
+        console.print(f"[cyan]CSV written[/cyan]: {n} leads -> {path}")
+
     try:
         for n, rep in crawler.crawl(
                 once=once, cycles=cycles,
                 on_new=lambda e: console.print(f"  [green]+ {e}[/green]")):
             console.print(f"[bold]Cycle {n}[/bold]: {rep.kept} kept, {rep.dead} dead, "
                           f"{rep.dropped} noise, {rep.dup} dup (of {rep.seen} seen)")
+            if export_every and (time.monotonic() - last_export) >= export_every * 3600:
+                do_export()
+                last_export = time.monotonic()
             if not once and not cycles:
-                console.print("[dim]sleeping ~15 min…[/dim]")
+                console.print("[dim]sleeping ~10-15 min…[/dim]")
     except KeyboardInterrupt:
         console.print("\n[yellow]Stopped.[/yellow] Leads saved.")
+    do_export()
     _status()
 
 
@@ -142,6 +160,10 @@ def _status():
             "SELECT COUNT(*) FROM contacts WHERE role IN ('hr','founder','ceo','cto') "
             "AND verify != 'invalid' AND status NOT IN ('invalid','sent') "
             "AND email NOT IN (SELECT email FROM suppression)").fetchone()[0]
+        cursor = int(db.get_state(conn, "dork_cursor", "0") or "0")
+    from .config import build_dorks
+    total_dorks = len(build_dorks())
+    pct = (cursor / total_dorks * 100) if total_dorks else 0
     t = Table(title="leadscraper status")
     t.add_column("metric"); t.add_column("count", justify="right")
     t.add_row("total contacts", str(total))
@@ -150,6 +172,7 @@ def _status():
     for r in by_grade:
         t.add_row(f"  grade {r['grade']}: {r['grade_label']}", str(r["c"]))
     t.add_row("[bold]exportable fresh leads[/bold]", f"[bold]{frow}[/bold]")
+    t.add_row("location coverage", f"{cursor}/{total_dorks} queries ({pct:.0f}%)")
     console.print(t)
 
 

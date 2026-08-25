@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from . import db, emails as em, extract, grading, sources
-from .config import QUERY_SLEEP, TARGET_PERSONA, build_dorks
+from .config import DORKS_PER_CYCLE, QUERY_SLEEP, TARGET_PERSONA, build_dorks
 
 
 @dataclass
@@ -21,7 +21,7 @@ class Report:
 
 
 def store_email(conn, email: str, source: str, *, company: str = "",
-                industry: str = "") -> str:
+                industry: str = "", location: str = "") -> str:
     """Run one bare email through the accuracy + grading pipeline."""
     keep, role = em.worth_keeping(email)
     if not keep:
@@ -37,7 +37,8 @@ def store_email(conn, email: str, source: str, *, company: str = "",
     cid = db.upsert_contact(conn, email=email, company=company, domain=domain,
                             role=role, grade=g["grade"], grade_label=g["grade_label"],
                             function=g["function"], rank_score=g["rank_score"],
-                            industry=industry or None, source=source)
+                            industry=industry or None, location=location or None,
+                            source=source)
     if cid is None:
         return "dup"
     db.set_verify(conn, cid, verdict)
@@ -45,7 +46,7 @@ def store_email(conn, email: str, source: str, *, company: str = "",
 
 
 def store_person(conn, person, source: str, *, company: str = "",
-                 industry: str = "") -> str:
+                 industry: str = "", location: str = "") -> str:
     """Store a NAMED contact (name+title+email+phone+linkedin) with a real grade."""
     email = (person.email or "").lower().strip()
     if not email:
@@ -68,7 +69,8 @@ def store_person(conn, person, source: str, *, company: str = "",
                             phone=person.phone or None, linkedin=person.linkedin or None,
                             grade=g["grade"], grade_label=g["grade_label"],
                             function=g["function"], rank_score=g["rank_score"],
-                            industry=industry or None, source=source)
+                            industry=industry or None, location=location or None,
+                            source=source)
     if cid is None:
         return "dup"
     db.set_verify(conn, cid, verdict)
@@ -93,11 +95,11 @@ def run_cycle(conn, *, on_new=None) -> Report:
         else:
             rep.dup += 1
 
-    def handle_emails(email_set, source):
+    def handle_emails(email_set, source, location=""):
         for email in email_set:
-            record(store_email(conn, email, source), email)
+            record(store_email(conn, email, source, location=location), email)
 
-    def handle_page(html, url, source):
+    def handle_page(html, url, source, location=""):
         """Named-person extraction FIRST, then any leftover role mailboxes."""
         domain = urlparse(url).netloc.removeprefix("www.")
         claimed: set[str] = set()
@@ -106,29 +108,35 @@ def run_cycle(conn, *, on_new=None) -> Report:
                 continue
             claimed.add(person.email)
             label = f"{person.full_name or person.email} ({person.title})" if person.title else person.email
-            record(store_person(conn, person, source), label)
+            record(store_person(conn, person, source, location=location), label)
         for email in em.extract(html):
             if email not in claimed:
-                record(store_email(conn, email, source), email)
+                record(store_email(conn, email, source, location=location), email)
 
-    # 1. keyless job boards + JSON feeds
+    # 1. keyless job boards + JSON feeds (no location tag)
     handle_emails(sources.board_remoteok(sess), "remoteok")
     handle_emails(sources.board_weworkremotely(sess), "weworkremotely")
     handle_emails(sources.board_feeds(sess), "jobfeed")
 
-    # 2. DuckDuckGo dorks
-    dorks = build_dorks()
-    random.shuffle(dorks)
-    for q in dorks:
-        results = sources.ddg(q, max_results=15)
+    # 2. DuckDuckGo dorks — walk the PRIORITY list from a saved cursor so a
+    #    24/7 run covers India first, then the world, then loops back.
+    all_dorks = build_dorks()
+    total = len(all_dorks)
+    cursor = int(db.get_state(conn, "dork_cursor", "0") or "0") % max(1, total)
+    batch = all_dorks[cursor:cursor + DORKS_PER_CYCLE]
+    for query, location in batch:
+        results = sources.ddg(query, max_results=15)
         for _url, snippet in results:
-            handle_emails(em.extract(snippet), "ddg-snippet")
+            handle_emails(em.extract(snippet), "ddg-snippet", location)
         for url, _ in results[:5]:
             page = sources.fetch(sess, url)
             if page:
-                handle_page(page, url, "ddg-page")
+                handle_page(page, url, "ddg-page", location)
             time.sleep(random.uniform(*sources.PAGE_SLEEP))
         time.sleep(random.uniform(*QUERY_SLEEP))
+    # advance cursor (wrap around when the whole world is covered)
+    db.set_state(conn, "dork_cursor", str((cursor + DORKS_PER_CYCLE) % max(1, total)))
+    conn.commit()
 
     return rep
 

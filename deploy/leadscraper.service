@@ -1,0 +1,17 @@
+[Unit]
+Description=leadscraper 24/7 lead crawler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/scraping-tool
+# Crawls the priority list (India first, then world) x all sectors, and writes
+# a fresh CSV to exports/ every 6 hours. Auto-restarts if it ever crashes.
+ExecStart=/home/ubuntu/scraping-tool/.venv/bin/python -m leadscraper crawl --export-every 6
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

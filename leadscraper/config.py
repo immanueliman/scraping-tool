@@ -20,19 +20,23 @@ KEEP_ROLES = {"hr", "founder", "ceo", "cto"}
 TARGET_PERSONA = "hr"
 
 # ── WHAT to search for (used to build search queries) ───────────────────────
-# Cities / locations to target.
-CITIES = ["hyderabad", "bangalore", "bengaluru", "vizag", "visakhapatnam",
-          "pune", "chennai", "remote india"]
-
-# Tech / role keywords — broaden for more coverage.
-KEYWORDS = [
-    "software engineer", "full stack", ".net core", "java", "python",
-    "react", "node", "devops", "data engineer", "ai engineer",
-    "machine learning", "backend", "frontend",
+# Sectors in PRIORITY order — tech first, then services, then non-IT.
+# Companies that hire + interview are the target (JHires = interview product).
+SECTORS = [
+    # tech (highest priority)
+    "software company", "it services company", "product company", "saas company",
+    "tech startup", "fintech", "edtech", "ai company", "software services",
+    # IT-enabled services
+    "bpo", "bpm", "kpo", "call center", "it consulting", "software consulting",
+    "staffing company", "recruitment agency",
+    # non-IT that still hire + interview at scale
+    "engineering company", "manufacturing company", "pharma company",
+    "healthcare company", "ecommerce company", "logistics company",
+    "financial services", "consulting firm",
 ]
 
-# The kind of companies you want (startups hire + interview a lot).
-SECTORS = ["startup", "software company", "it services", "product company"]
+# Contact terms that surface HR/careers/founder addresses on a page.
+CONTACT_TERMS = '"hr@" OR "careers@" OR "talent@" OR "recruit@" OR "founder@"'
 
 # Mailboxes worth keeping even without a person's name (careers@, jobs@, hr@…).
 USEFUL_GENERIC = {"careers", "jobs", "hr", "hiring", "recruitment", "talent",
@@ -53,26 +57,28 @@ FREE_MAIL = {
     "live.com", "icloud.com", "rediffmail.com", "protonmail.com", "aol.com",
 }
 
+# How many queries one crawl cycle processes (from the saved cursor). The full
+# location x sector list is huge; a cycle does a batch, then the cursor advances
+# so a 24/7 run covers everything over time and loops back.
+DORKS_PER_CYCLE = 40
+
 # ── crawl pacing (be polite; avoid rate-limits) ─────────────────────────────
 QUERY_SLEEP = (8, 15)     # seconds between search queries
 PAGE_SLEEP = (1.5, 3)     # seconds between page fetches
-CYCLE_SLEEP = (900, 1200) # seconds between full crawl cycles (15-20 min)
+CYCLE_SLEEP = (600, 900)  # seconds between crawl cycles (10-15 min)
 
 
-def build_dorks() -> list[str]:
-    """Compose search queries from the config above."""
-    dorks: list[str] = []
-    contact = '"hr@" OR "careers@" OR "talent@" OR "recruit@" OR "founder@"'
-    for city in CITIES:
-        for kw in KEYWORDS[:8]:            # cap so cycles stay reasonable
-            dorks.append(f'"{city}" "{kw}" hiring {contact}')
+def build_dorks() -> list[tuple[str, str]]:
+    """PRIORITY-ordered [(query, 'City, Country')] — India first, then world.
+
+    For each location (in priority order) we sweep the sectors (tech first),
+    plus a careers-page dork. The crawler walks this list via a saved cursor.
+    """
+    from .locations import priority_locations
+    dorks: list[tuple[str, str]] = []
+    for city, label in priority_locations():
         for sector in SECTORS:
-            dorks.append(f'"{sector}" "{city}" hiring {contact} email')
-        dorks.append(f'inurl:careers "{city}" hiring "apply" email')
-    # founder / CEO discovery (decision-makers at startups)
-    dorks += [
-        '"we\'re hiring" startup india "founder@" OR "careers@" OR "hr@"',
-        '"join our team" startup india engineer "hr@" OR "careers@"',
-        'inurl:careers startup india "apply" "hr@" OR "jobs@"',
-    ]
+            dorks.append((f'"{city}" "{sector}" hiring {CONTACT_TERMS} email', label))
+        dorks.append((f'inurl:careers "{city}" hiring "apply" email', label))
+        dorks.append((f'"{city}" startup hiring "founder@" OR "careers@" OR "hr@"', label))
     return dorks

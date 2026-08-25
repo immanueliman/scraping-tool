@@ -27,21 +27,34 @@ def export_leads(conn, *, out: str | None = None, fresh: bool = True,
     if fresh:
         where.append("verify IN ('valid', 'risky', 'unknown')")
 
-    cols = ("company", "domain", "full_name", "title", "grade", "grade_label",
-            "function", "email", "phone", "linkedin", "rank_score", "verify", "source")
+    dbcols = ("company", "full_name", "title", "grade", "grade_label", "function",
+              "email", "phone", "location", "linkedin", "domain", "rank_score",
+              "verify", "source")
     rows = conn.execute(
-        f"SELECT {', '.join(cols)} FROM contacts "
+        f"SELECT {', '.join(dbcols)} FROM contacts "
         f"WHERE {' AND '.join(where)} "
         f"ORDER BY rank_score DESC, grade DESC, domain", params).fetchall()
+
+    # Clean, filter-friendly header. Missing values are written as "".
+    header = ["sno", "company_name", "name", "title", "grade", "grade_label",
+              "function", "email", "phone", "location", "linkedin", "website",
+              "rank_score", "verify", "source"]
 
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     path = Path(out) if out else EXPORT_DIR / f"leads_{stamp}.csv"
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
-        w.writerow(cols)
-        for r in rows:
-            w.writerow([r[c] for c in cols])
+        w.writerow(header)
+        for i, r in enumerate(rows, 1):
+            website = f"https://{r['domain']}" if r["domain"] else ""
+            w.writerow([
+                i, r["company"] or "", r["full_name"] or "", r["title"] or "",
+                r["grade"] or "", r["grade_label"] or "", r["function"] or "",
+                r["email"] or "", r["phone"] or "", r["location"] or "",
+                r["linkedin"] or "", website, r["rank_score"] or 0,
+                r["verify"] or "", r["source"] or "",
+            ])
     return path, len(rows)
 
 
