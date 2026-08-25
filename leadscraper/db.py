@@ -41,10 +41,22 @@ CREATE TABLE IF NOT EXISTS state (
     key           TEXT PRIMARY KEY,
     value         TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_contacts_role   ON contacts(role);
-CREATE INDEX IF NOT EXISTS idx_contacts_verify ON contacts(verify);
-CREATE INDEX IF NOT EXISTS idx_contacts_rank   ON contacts(rank_score);
 """
+
+# Columns beyond (id, email, created_at) — used to migrate an OLD leads.db that
+# predates newer columns (CREATE TABLE IF NOT EXISTS cannot add them).
+_CONTACT_COLUMNS = {
+    "company": "TEXT", "domain": "TEXT", "role": "TEXT DEFAULT 'other'",
+    "full_name": "TEXT", "title": "TEXT", "phone": "TEXT", "linkedin": "TEXT",
+    "grade": "TEXT", "grade_label": "TEXT", "function": "TEXT",
+    "rank_score": "INTEGER DEFAULT 0", "industry": "TEXT", "location": "TEXT",
+    "verify": "TEXT DEFAULT 'unknown'", "source": "TEXT", "status": "TEXT DEFAULT 'new'",
+}
+_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_contacts_role   ON contacts(role)",
+    "CREATE INDEX IF NOT EXISTS idx_contacts_verify ON contacts(verify)",
+    "CREATE INDEX IF NOT EXISTS idx_contacts_rank   ON contacts(rank_score)",
+)
 
 
 def get_state(conn, key: str, default: str = "") -> str:
@@ -82,7 +94,15 @@ def session(path: Path | None = None) -> Iterator[sqlite3.Connection]:
 def init(path: Path | None = None) -> Path:
     target = path or DB_PATH
     with session(target) as conn:
-        conn.executescript(SCHEMA)
+        conn.executescript(SCHEMA)                 # create tables if missing
+        # migrate: add any columns an older contacts table is missing…
+        have = {r[1] for r in conn.execute("PRAGMA table_info(contacts)")}
+        for col, decl in _CONTACT_COLUMNS.items():
+            if col not in have:
+                conn.execute(f"ALTER TABLE contacts ADD COLUMN {col} {decl}")
+        # …then build indexes (safe now that rank_score etc. exist)
+        for idx in _INDEXES:
+            conn.execute(idx)
     return target
 
 
@@ -115,30 +135,42 @@ def upsert_contact(conn, *, email: str, company: str = "", domain: str = "",
     email = email.lower().strip()
     if is_suppressed(conn, email):
         return None
-    row = conn.execute("SELECT id, rank_score FROM contacts WHERE email = ?", (email,)).fetchone()
+    row = conn.execute(
+        "SELECT id, rank_score, grade, grade_label, function FROM contacts "
+        "WHERE email = ?", (email,)).fetchone()
     if row:
-        # keep the higher-grade record if a later pass found a named person
-        keep_rank = max(int(row["rank_score"] or 0), rank_score)
+        # Only let a NEW pass overwrite grade/label/function when it is at least
+        # as strong (rank) as what's stored — so a later bare-mailbox sighting
+        # can't downgrade a named decision-maker. Name/phone/etc. still enrich.
+        existing = int(row["rank_score"] or 0)
+        better = rank_score >= existing
+        new_grade = grade if better else row["grade"]
+        new_label = grade_label if better else row["grade_label"]
+        new_fn = function if better else row["function"]
         conn.execute(
             "UPDATE contacts SET company = COALESCE(NULLIF(?,''), company), "
             "domain = COALESCE(NULLIF(?,''), domain), "
             "role = CASE WHEN role = 'other' THEN ? ELSE role END, "
             "full_name = COALESCE(?, full_name), title = COALESCE(?, title), "
             "phone = COALESCE(NULLIF(?,''), phone), linkedin = COALESCE(NULLIF(?,''), linkedin), "
-            "grade = COALESCE(?, grade), grade_label = COALESCE(?, grade_label), "
-            "function = COALESCE(?, function), rank_score = ?, "
+            "grade = ?, grade_label = ?, function = ?, rank_score = ?, "
             "industry = COALESCE(?, industry), "
             "location = COALESCE(NULLIF(?,''), location) WHERE id = ?",
-            (company, domain, role, full_name, title, phone, linkedin, grade,
-             grade_label, function, keep_rank, industry, location, row["id"]))
+            (company, domain, role, full_name, title, phone, linkedin, new_grade,
+             new_label, new_fn, max(existing, rank_score), industry, location, row["id"]))
         return int(row["id"])
-    cur = conn.execute(
-        "INSERT INTO contacts (email, company, domain, role, full_name, title, "
-        "phone, linkedin, grade, grade_label, function, rank_score, industry, "
-        "location, source, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (email, company, domain, role, full_name, title, phone, linkedin, grade,
-         grade_label, function, rank_score, industry, location, source, now()))
-    return int(cur.lastrowid)
+    try:
+        cur = conn.execute(
+            "INSERT INTO contacts (email, company, domain, role, full_name, title, "
+            "phone, linkedin, grade, grade_label, function, rank_score, industry, "
+            "location, source, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (email, company, domain, role, full_name, title, phone, linkedin, grade,
+             grade_label, function, rank_score, industry, location, source, now()))
+        return int(cur.lastrowid)
+    except sqlite3.IntegrityError:
+        # concurrent writer inserted the same email between our SELECT and INSERT
+        r2 = conn.execute("SELECT id FROM contacts WHERE email = ?", (email,)).fetchone()
+        return int(r2["id"]) if r2 else None
 
 
 def set_verify(conn, contact_id: int, verify: str) -> None:

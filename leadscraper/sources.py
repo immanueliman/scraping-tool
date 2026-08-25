@@ -117,23 +117,3 @@ def board_weworkremotely(sess) -> set[str]:
             found |= em.extract(page)
         time.sleep(random.uniform(*PAGE_SLEEP))
     return found
-
-
-def harvest_site(domain: str, sess=None, timeout=12) -> tuple[set[str], int]:
-    """Scrape a single company's public pages. Returns (emails, pages_fetched)."""
-    domain = (domain.lower().strip().removeprefix("http://")
-              .removeprefix("https://").split("/")[0].removeprefix("www."))
-    sess = sess or session()
-    found: set[str] = set()
-    pages = 0
-    for path in CONTACT_PATHS:
-        url = urljoin(f"https://{domain}", path)
-        html = fetch(sess, url, timeout)
-        if not html:
-            continue
-        # skip off-domain redirects (dead paths)
-        # (we can't see final url from fetch(); keep it simple and accept)
-        found |= em.extract(html)
-        pages += 1
-        time.sleep(random.uniform(*PAGE_SLEEP))
-    return found, pages

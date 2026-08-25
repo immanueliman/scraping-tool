@@ -6,34 +6,39 @@ import csv
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import KEEP_ROLES, ROOT
+from .config import ROOT
 
 EXPORT_DIR = ROOT / "exports"
+
+# One predicate shared by export AND the status "exportable" count so they agree.
+# rank_score >= 20 keeps every named person (>=29) plus decision/HR mailboxes
+# (0d=55, 0h=25+) and drops generic (0g=12-18) and noise (0x=3) mailboxes.
+BASE_WHERE = ("rank_score >= 20 AND verify != 'invalid' "
+              "AND status NOT IN ('invalid', 'sent') "
+              "AND email NOT IN (SELECT email FROM suppression)")
+FRESH_WHERE = " AND verify IN ('valid', 'risky', 'unknown')"
 
 
 def export_leads(conn, *, out: str | None = None, fresh: bool = True,
                  role: str = "any") -> tuple[Path, int]:
-    where = [
-        "role IN (%s)" % ",".join("?" * len(KEEP_ROLES)),
-        "verify != 'invalid'",
-        "status NOT IN ('invalid', 'sent')",
-        "email NOT IN (SELECT email FROM suppression)",
-    ]
-    params = list(KEEP_ROLES)
+    where = [BASE_WHERE]
+    params: list = []
     if role != "any":
         buckets = [r.strip() for r in role.split(",") if r.strip()]
         where.append("role IN (%s)" % ",".join("?" * len(buckets)))
         params += buckets
     if fresh:
-        where.append("verify IN ('valid', 'risky', 'unknown')")
+        where.append(FRESH_WHERE.strip().removeprefix("AND ").strip())
 
     dbcols = ("company", "full_name", "title", "grade", "grade_label", "function",
               "email", "phone", "location", "linkedin", "domain", "rank_score",
               "verify", "source")
+    # rank_score already encodes seniority; don't tiebreak on the TEXT grade
+    # column (where 'None'/'0h' would sort lexically above '6').
     rows = conn.execute(
         f"SELECT {', '.join(dbcols)} FROM contacts "
         f"WHERE {' AND '.join(where)} "
-        f"ORDER BY rank_score DESC, grade DESC, domain", params).fetchall()
+        f"ORDER BY rank_score DESC, domain", params).fetchall()
 
     # Clean, filter-friendly header. Missing values are written as "".
     header = ["sno", "company_name", "name", "title", "grade", "grade_label",
@@ -68,8 +73,12 @@ def import_csv(conn, path: str) -> int:
         ekey = keymap.get("email")
         if not ekey:
             raise ValueError("CSV needs an 'email' column")
-        ckey = keymap.get("company") or keymap.get("domain")
+        # accept our own export headers (company_name / website / name) as well
+        ckey = (keymap.get("company") or keymap.get("company_name")
+                or keymap.get("domain") or keymap.get("website"))
+        nkey = keymap.get("name") or keymap.get("full_name")
         skey = keymap.get("status")
+        existing_before = conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
         for row in reader:
             email = (row.get(ekey) or "").strip().lower()
             if not email or "@" not in email:
@@ -82,18 +91,20 @@ def import_csv(conn, path: str) -> int:
                 db.suppress(conn, email, reason="imported-sent")
                 continue
             company = (row.get(ckey) or "").strip() if ckey else ""
-            if "." in company or "@" in company or em.is_free_mail(email):
+            if company.startswith("http") or "." in company or "@" in company or em.is_free_mail(email):
                 company = "" if em.is_free_mail(email) else email.split("@")[-1].split(".")[0].title()
             title = (row.get(keymap.get("title")) or "").strip() if keymap.get("title") else ""
+            name = (row.get(nkey) or "").strip() if nkey else ""
             v = em.verify(email)
             g = grading.grade_contact(email=email, title=title or None,
-                                      mx_ok=(v != "invalid"))
+                                      is_named=bool(name), mx_ok=(v != "invalid"))
             cid = db.upsert_contact(conn, email=email, company=company,
                                     domain=email.split("@")[-1], role=role,
-                                    title=title or None, grade=g["grade"],
-                                    grade_label=g["grade_label"], function=g["function"],
-                                    rank_score=g["rank_score"], source="import")
+                                    full_name=name or None, title=title or None,
+                                    grade=g["grade"], grade_label=g["grade_label"],
+                                    function=g["function"], rank_score=g["rank_score"],
+                                    source="import")
             if cid is not None:
                 db.set_verify(conn, cid, v)
-                added += 1
+    added = conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0] - existing_before
     return added

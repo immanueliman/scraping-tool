@@ -91,6 +91,7 @@ def find_person(name: str = typer.Option(..., help="Full name"),
                 title: str = typer.Option("", help="Their title (optional)"),
                 smtp_probe: bool = typer.Option(False, help="SMTP probe (slow)")):
     """Guess a named person's email from name + domain."""
+    db.init()
     dom = _norm(domain)
     guesses = em.guess_emails(name, dom)
     if not guesses:
@@ -139,6 +140,7 @@ def export(out: str = typer.Option("", help="Output CSV path"),
            role: str = typer.Option("any", help="hr,founder,ceo,cto or any"),
            fresh: bool = typer.Option(True, help="Only leads not yet sent")):
     """Export a clean, verified CSV."""
+    db.init()
     with db.session() as conn:
         path, n = exporter.export_leads(conn, out=out or None, role=role, fresh=fresh)
     if n == 0:
@@ -148,6 +150,7 @@ def export(out: str = typer.Option("", help="Output CSV path"),
 
 
 def _status():
+    db.init()
     with db.session() as conn:
         total = conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
         sent = conn.execute("SELECT COUNT(*) FROM suppression").fetchone()[0]
@@ -157,9 +160,8 @@ def _status():
             "SELECT grade, grade_label, COUNT(*) c FROM contacts "
             "WHERE grade IS NOT NULL GROUP BY grade ORDER BY c DESC").fetchall()
         frow = conn.execute(
-            "SELECT COUNT(*) FROM contacts WHERE role IN ('hr','founder','ceo','cto') "
-            "AND verify != 'invalid' AND status NOT IN ('invalid','sent') "
-            "AND email NOT IN (SELECT email FROM suppression)").fetchone()[0]
+            f"SELECT COUNT(*) FROM contacts WHERE {exporter.BASE_WHERE}"
+            f"{exporter.FRESH_WHERE}").fetchone()[0]
         cursor = int(db.get_state(conn, "dork_cursor", "0") or "0")
     from .config import build_dorks
     total_dorks = len(build_dorks())

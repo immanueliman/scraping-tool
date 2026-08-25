@@ -112,5 +112,7 @@ and can be added as connectors.
 
 ## Legal
 Cold outreach is your responsibility (India DPDP / GDPR / CAN-SPAM): identify
-yourself, keep it relevant, honor opt-outs. Don't scrape sites that forbid it,
-and don't use LinkedIn scrapers.
+yourself, keep it relevant, honor opt-outs. The tool paces its requests but does
+**not** auto-read every site's robots.txt — you are responsible for not
+scraping sites that forbid it, and it never touches LinkedIn (it only records
+`/in/` URLs a company publishes on its own pages).

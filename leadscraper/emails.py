@@ -36,7 +36,7 @@ def _cf_decode(hex_str: str) -> str | None:
     except Exception:
         return None
 
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,7}")
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}(?![A-Za-z])")
 SYNTAX_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 # ── role classification (token-aware so 'hr' doesn't match 'alexhraber') ─────
@@ -120,8 +120,8 @@ def extract(text: str) -> set[str]:
                .replace("\\u003e", ">").replace("\\u003c", "<")
                .replace("\\u0026", "&").replace("\\u0040", "@")
                .replace("\\u002e", ".").replace("&#64;", "@").replace("&commat;", "@")
-               .replace("[at]", "@").replace("(at)", "@").replace(" at ", "@")
-               .replace("[dot]", ".").replace("(dot)", ".").replace(" dot ", "."))
+               .replace("[at]", "@").replace("(at)", "@")
+               .replace("[dot]", ".").replace("(dot)", "."))
     for raw in EMAIL_RE.findall(decoded):
         cleaned = _strip_artifacts(raw.lower())
         if cleaned:
@@ -183,12 +183,17 @@ def verify(email: str, *, smtp_probe: bool = False) -> str:
     email = email.strip().lower()
     if not syntax_ok(email):
         return "invalid"
-    if not has_mx(email.split("@")[-1]):
+    domain = email.split("@")[-1]
+    if not has_mx(domain):
         return "invalid"
     if smtp_probe:
         r = _smtp_probe(email)
-        if r != "unknown":
-            return r
+        if r == "rejected":
+            return "invalid"
+        if r == "accepted":
+            # a catch-all domain 250-OKs everything, so 'accepted' proves nothing
+            return "risky" if detect_catch_all(domain) == "catch_all" else "valid"
+        # 'unknown' (port 25 blocked / greylisted) -> fall through to MX result
     return "risky" if is_free_mail(email) else "unknown"
 
 

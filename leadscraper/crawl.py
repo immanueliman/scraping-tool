@@ -63,8 +63,11 @@ def store_person(conn, person, source: str, *, company: str = "",
     g = grading.grade_contact(email=email, title=person.title, is_named=bool(person.full_name),
                               has_phone=bool(person.phone), has_linkedin=bool(person.linkedin),
                               mx_ok=(verdict != "invalid"), target_persona=TARGET_PERSONA)
+    # role from the TITLE (maps Founder->founder, CEO->ceo, CTO->cto, HR->hr),
+    # not the grading 'function' vocab which export/status don't recognise
+    role = em.classify_role(email, person.title)
     cid = db.upsert_contact(conn, email=email, company=company, domain=domain,
-                            role=role if role != "other" else g["function"],
+                            role=role,
                             full_name=person.full_name or None, title=person.title or None,
                             phone=person.phone or None, linkedin=person.linkedin or None,
                             grade=g["grade"], grade_label=g["grade_label"],
@@ -123,16 +126,23 @@ def run_cycle(conn, *, on_new=None) -> Report:
     all_dorks = build_dorks()
     total = len(all_dorks)
     cursor = int(db.get_state(conn, "dork_cursor", "0") or "0") % max(1, total)
-    batch = all_dorks[cursor:cursor + DORKS_PER_CYCLE]
+    # wrap the batch so every cycle does a full DORKS_PER_CYCLE and coverage is
+    # even across the end-of-list boundary
+    n = min(DORKS_PER_CYCLE, total)
+    batch = [all_dorks[(cursor + i) % total] for i in range(n)]
     for query, location in batch:
-        results = sources.ddg(query, max_results=15)
-        for _url, snippet in results:
-            handle_emails(em.extract(snippet), "ddg-snippet", location)
-        for url, _ in results[:5]:
-            page = sources.fetch(sess, url)
-            if page:
-                handle_page(page, url, "ddg-page", location)
-            time.sleep(random.uniform(*sources.PAGE_SLEEP))
+        try:
+            results = sources.ddg(query, max_results=15)
+            for _url, snippet in results:
+                handle_emails(em.extract(snippet), "ddg-snippet", location)
+            for url, _ in results[:5]:
+                page = sources.fetch(sess, url)
+                if page:
+                    handle_page(page, url, "ddg-page", location)
+                time.sleep(random.uniform(*sources.PAGE_SLEEP))
+        except Exception:
+            # one bad query/page must never abort the cycle or the 24/7 daemon
+            pass
         time.sleep(random.uniform(*QUERY_SLEEP))
     # advance cursor (wrap around when the whole world is covered)
     db.set_state(conn, "dork_cursor", str((cursor + DORKS_PER_CYCLE) % max(1, total)))

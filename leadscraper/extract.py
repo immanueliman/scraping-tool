@@ -32,6 +32,28 @@ NAME_RE = re.compile(r"^(?:Mr|Ms|Mrs|Dr|Prof)?\.?\s*"
                      r"([A-Z][a-z'’]+(?:\s+[A-Z][a-z'’.]+){1,2})$")
 LINKEDIN_IN_RE = re.compile(r"linkedin\.com/in/[\w\-%]+", re.I)
 
+# Title-Case page headings that NAME_RE would otherwise capture as a person.
+_NOT_A_NAME = {"our team", "about us", "our leadership", "leadership team",
+               "our people", "meet the team", "meet our team", "contact us",
+               "our story", "who we are", "the team", "our founders",
+               "our company", "our mission", "join us", "work with us",
+               "our values", "get in touch", "our board", "senior leadership"}
+
+
+def _looks_like_name(text: str) -> str:
+    m = NAME_RE.match(text.strip())
+    if not m:
+        return ""
+    cand = m.group(1)
+    return "" if cand.lower() in _NOT_A_NAME else cand
+
+
+def _s(v) -> str:
+    """Coerce a JSON-LD value (which may be a list) to a single string."""
+    if isinstance(v, (list, tuple)):
+        v = v[0] if v else ""
+    return v.strip() if isinstance(v, str) else ""
+
 
 @dataclass
 class Person:
@@ -76,10 +98,9 @@ def _people_from_jsonld(html: str) -> list[Person]:
         raw = tag.string or tag.get_text() or ""
         try:
             data = json.loads(raw)
+            people.extend(_walk_jsonld(data))
         except Exception:
-            continue
-        for node in _walk_jsonld(data):
-            people.append(node)
+            continue          # a malformed node must never kill the crawl
     return people
 
 
@@ -87,19 +108,18 @@ def _walk_jsonld(data) -> list[Person]:
     out: list[Person] = []
 
     def person_of(obj) -> Person | None:
-        name = obj.get("name") or " ".join(
-            x for x in [obj.get("givenName"), obj.get("familyName")] if x)
-        email = (obj.get("email") or "").replace("mailto:", "").strip().lower()
-        title = obj.get("jobTitle") or ""
-        phone = (obj.get("telephone") or "").strip()
+        name = _s(obj.get("name")) or " ".join(
+            x for x in [_s(obj.get("givenName")), _s(obj.get("familyName"))] if x)
+        email = _s(obj.get("email")).replace("mailto:", "").strip().lower()
+        title = _s(obj.get("jobTitle"))
+        phone = _s(obj.get("telephone"))
         same = obj.get("sameAs") or []
         if isinstance(same, str):
             same = [same]
         linkedin = next((s for s in same if "linkedin.com/in" in str(s).lower()), "")
         if name or email:
-            return Person(full_name=str(name or "").strip(), title=str(title),
-                          email=email, phone=str(phone), linkedin=str(linkedin),
-                          source="jsonld")
+            return Person(full_name=name.strip(), title=title, email=email,
+                          phone=phone, linkedin=str(linkedin), source="jsonld")
         return None
 
     def recurse(obj):
@@ -156,10 +176,9 @@ def _title_from(card) -> str:
 
 def _name_in(node) -> str:
     for h in node.find_all(["h1", "h2", "h3", "h4", "h5", "strong", "b"], limit=6):
-        txt = h.get_text(" ", strip=True)
-        m = NAME_RE.match(txt)
-        if m:
-            return m.group(1)
+        name = _looks_like_name(h.get_text(" ", strip=True))
+        if name:
+            return name
     return ""
 
 
@@ -172,14 +191,20 @@ def _people_from_cards(html: str, domain: str) -> list[Person]:
         card_text = card.get_text(" ", strip=True)
         if len(card_text) > 600:      # too big to be one person's card
             continue
-        emails = {e for e in em.extract(card_html)
-                  if e.split("@")[-1] == domain or domain in e.split("@")[-1]}
+        # keep only on-domain emails (exact host or a real subdomain of it);
+        # never match on an empty domain or a mere substring (acme.co vs acme.com)
+        emails = sorted(
+            e for e in em.extract(card_html)
+            if domain and (e.split("@")[-1] == domain
+                           or e.split("@")[-1].endswith("." + domain))
+        )
         name = _name_in(card)
         title = _title_from(card)
         if not (name and (title or emails)):
             continue
+        # deterministic pick: prefer a personal (non-role) address, then sorted
         email = ""
-        for e in emails:
+        for e in sorted(emails, key=lambda x: (em.is_role_email(x), x)):
             if e not in seen_emails:
                 email = e
                 break

@@ -42,8 +42,10 @@ _ABBREV = {
 
 
 def normalize_title(title: str) -> str:
-    t = (title or "").lower().replace(".", " ")
-    t = re.sub(r"[^a-z0-9&\- ]+", " ", t)
+    # hyphens/dots -> spaces so 'vice-president' == 'vice president', 'co-founder'
+    # == 'co founder' (else the VP negative-lookbehind and rules mis-fire).
+    t = (title or "").lower().replace(".", " ").replace("-", " ")
+    t = re.sub(r"[^a-z0-9& ]+", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     tokens = [_ABBREV.get(tok, tok) for tok in t.split(" ")]
     return " ".join(tokens)
@@ -63,6 +65,7 @@ _RULES: list[tuple[str, object, str]] = [
     (r"\bpresident\b(?<!vice president)", 5, "exec"),
     (r"chair(man|person|woman)|managing partner", 5, "exec"),
     (r"country (head|manager|director)", 5, "exec"),
+    (r"chief of staff", 4, "exec"),
     # G3 qualifier tier — MUST be tested before the shorter G4 VP/GM patterns,
     # because 'assistant general manager' contains 'general manager'.
     (r"assistant vice president|assistant general manager|deputy general manager|chief manager|associate (director|vice president)", 3, "exec"),
@@ -70,7 +73,7 @@ _RULES: list[tuple[str, object, str]] = [
     (r"vice president of (hr|people|talent)|vp (of )?(hr|people|talent)|head of (hr|people|talent)|(hr|people|talent) head", 4, "hr"),
     (r"vice president of (engineering|technology)|vp (of )?(engineering|technology)|head of (engineering|technology|platform)|director of engineering|engineering director", 4, "eng"),
     (r"senior vice president|executive vice president|\bvice president\b", 4, "exec"),
-    (r"head of [a-z ]+|general manager", 4, "exec"),
+    (r"head of [a-z ]+|general manager|\b[a-z]+ head\b|\bhead\b", 4, "exec"),
     (r"\b(senior |associate )?director\b", 4, "exec"),
     # G3 Sr Manager / Principal
     (r"(senior|group) manager|principal|(zonal|circle|cluster) (head|manager)", 3, "exec"),
@@ -133,12 +136,18 @@ _MAILBOX = {
 
 def grade_mailbox(email: str) -> tuple[object, str]:
     local = email.split("@")[0].split("+")[0].lower()
-    # a firstname.lastname@ pattern is a person, not a role mailbox
-    if re.match(r"^[a-z]+[._][a-z]+$", local):
-        return None, GRADE_LABEL[None]
+    # exact role mailbox (ceo, hr, careers, info, noreply…)
     for sub, names in _MAILBOX.items():
         if local in names:
             return sub, GRADE_LABEL[sub]
+    # segmented role mailbox: hr.support / talent.acquisition / hr_team / ceo.office
+    segs = [s for s in re.split(r"[._\-]", local) if s]
+    for sub in ("0d", "0h"):     # rescue only decision / HR inboxes
+        if any(s in _MAILBOX[sub] for s in segs):
+            return sub, GRADE_LABEL[sub]
+    # a firstname.lastname@ pattern with no role segment is a person, not a mailbox
+    if re.match(r"^[a-z]+[._][a-z]+$", local):
+        return None, GRADE_LABEL[None]
     return "0g", GRADE_LABEL["0g"]
 
 
@@ -181,5 +190,5 @@ def grade_contact(*, email: str, title: str | None = None, is_named: bool = Fals
     score = rank_score(grade=grade, function=fn, is_named=is_named,
                        personal_email=personal, has_contact=has_phone or has_linkedin,
                        mx_ok=mx_ok, target_persona=target_persona)
-    return {"grade": str(grade), "grade_label": label, "function": fn,
-            "rank_score": score}
+    return {"grade": (str(grade) if grade is not None else None),
+            "grade_label": label, "function": fn, "rank_score": score}
